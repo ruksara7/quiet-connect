@@ -144,6 +144,19 @@
     textarea:focus {
       border-color: #9ca3af;
     }
+
+    /* Assistant box */
+    #assistantBox {
+      margin-top: 20px;
+      border-top: 1px solid #e5e7eb;
+      padding-top: 14px;
+    }
+
+    #assistantReply {
+      margin-top: 8px;
+      font-size: 13px;
+      color: #374151;
+    }
   </style>
 </head>
 
@@ -188,6 +201,21 @@
         </textarea>
 
         <button onclick="send()">Send</button>
+      </div>
+
+      <!-- SYSTEM ASSISTANT (NEW) -->
+      <div id="assistantBox">
+        <div style="font-size:13px;color:#6b7280;margin-bottom:6px;">
+          Quiet Assistant (optional)
+        </div>
+
+        <textarea id="assistantInput"
+          rows="2"
+          placeholder="Ask something while you wait..."></textarea>
+
+        <button onclick="sendAssistant()">Ask</button>
+
+        <div id="assistantReply"></div>
       </div>
 
     </div>
@@ -246,6 +274,26 @@
       const chat = document.getElementById("chat");
       chat.appendChild(div);
       chat.scrollTop = chat.scrollHeight;
+    }
+
+    /* =========================
+       SYSTEM ASSISTANT LOGIC
+       ========================= */
+    async function sendAssistant() {
+      const text = document.getElementById("assistantInput").value.trim();
+      if (!text) return;
+
+      const res = await fetch("/assistant-message", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text })
+      });
+
+      const data = await res.json();
+      document.getElementById("assistantReply").innerText =
+        data.message || "No response";
+
+      document.getElementById("assistantInput").value = "";
     }
   </script>
 </body>
