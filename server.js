@@ -27,7 +27,7 @@ if (!N8N_URL) {
 let waitingUser = null;
 
 /* ======================
-   SYSTEM ASSISTANT
+   SYSTEM ASSISTANT (n8n)
    ====================== */
 app.post("/assistant-message", async (req, res) => {
   try {
@@ -39,8 +39,24 @@ app.post("/assistant-message", async (req, res) => {
       body: JSON.stringify({ text: userText })
     });
 
-    const data = await response.json();
-    res.json(data);
+    // IMPORTANT: DO NOT parse JSON
+    const raw = await response.text();
+    console.log("N8N RAW RESPONSE:", raw);
+
+    // n8n may legally return empty body
+    if (!raw || raw.trim() === "") {
+      return res.json({
+        system: true,
+        state: "silent",
+        message: ""
+      });
+    }
+
+    // Forward n8n response exactly
+    res
+      .status(200)
+      .set("Content-Type", "application/json")
+      .send(raw);
 
   } catch (error) {
     console.error("Assistant error:", error);
