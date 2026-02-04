@@ -2,9 +2,6 @@ import express from "express";
 import http from "http";
 import { Server } from "socket.io";
 
-/* ======================
-   APP SETUP
-   ====================== */
 const app = express();
 const server = http.createServer(app);
 
@@ -18,9 +15,6 @@ const io = new Server(server, {
 app.use(express.json());
 app.use(express.static("public"));
 
-/* ======================
-   ENV
-   ====================== */
 const N8N_URL = process.env.N8N_URL;
 
 if (!N8N_URL) {
@@ -28,23 +22,12 @@ if (!N8N_URL) {
   process.exit(1);
 }
 
-/* ======================
-   MATCHING STATE
-   ====================== */
 let waitingUser = null;
 
-/* ======================
-   SYSTEM ASSISTANT
-   ====================== */
 app.post("/assistant-message", async (req, res) => {
   try {
-    // Accept BOTH new + old formats safely
-    const state =
-      req.body?.state ||
-      req.body?.text ||
-      "waiting";
-
-    console.log("📨 Assistant state received:", state);
+    const payload = req.body;
+    console.log("📨 Assistant state received:", JSON.stringify(payload));
 
     const n8nResponse = await fetch(N8N_URL, {
       method: "POST",
@@ -52,21 +35,17 @@ app.post("/assistant-message", async (req, res) => {
         "Content-Type": "application/json",
         "User-Agent": "Quiet-Connect/1.0"
       },
-      body: JSON.stringify({
-        intent_key: state
-      })
+      body: JSON.stringify(payload)
     });
 
     const raw = await n8nResponse.text();
     console.log("📥 N8N RAW RESPONSE:", raw || "EMPTY");
 
-    // HARD FALLBACK — UI never breaks
     if (!raw || raw.trim() === "") {
-      return res.json({
-        system: true,
-        state,
-        message: "⏳ Please wait quietly…"
-      });
+      const fallback = payload.state === "waiting" ? 
+        { system: true, message: "⏳ Please wait quietly. A partner will connect soon…" } :
+        { system: false, message: `Echo: ${payload.text || "hello"}` };
+      return res.json(fallback);
     }
 
     let data;
@@ -74,32 +53,24 @@ app.post("/assistant-message", async (req, res) => {
       data = JSON.parse(raw);
     } catch (e) {
       console.error("❌ Invalid JSON from n8n:", raw);
-      return res.status(502).json({
-        system: true,
-        state: "error",
-        message: "Assistant response invalid"
-      });
+      const fallback = payload.state === "waiting" ? 
+        { system: true, message: "⏳ Please wait quietly. A partner will connect soon…" } :
+        { system: false, message: `Echo: ${payload.text || "hello"}` };
+      return res.json(fallback);
     }
 
-    return res.json({
-      system: true,
-      state: data.state || state,
-      message: data.message || "⏳ Please wait quietly…"
-    });
+    res.json(data);
 
   } catch (err) {
     console.error("💥 Assistant error:", err.message);
-    return res.status(500).json({
-      system: true,
-      state: "error",
-      message: "Assistant temporarily unavailable"
-    });
+    const payload = req.body;
+    const fallback = payload.state === "waiting" ? 
+      { system: true, message: "⏳ Please wait quietly. A partner will connect soon…" } :
+      { system: false, message: "Assistant temporarily unavailable" };
+    res.json(fallback);
   }
 });
 
-/* ======================
-   SOCKET.IO CHAT
-   ====================== */
 io.on("connection", (socket) => {
   console.log("🔌 User connected:", socket.id);
 
@@ -172,9 +143,6 @@ io.on("connection", (socket) => {
   });
 });
 
-/* ======================
-   HEALTH CHECK
-   ====================== */
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
@@ -183,9 +151,6 @@ app.get("/health", (req, res) => {
   });
 });
 
-/* ======================
-   START SERVER
-   ====================== */
 const PORT = process.env.PORT || 10000;
 
 server.listen(PORT, "0.0.0.0", () => {
