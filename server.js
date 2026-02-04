@@ -2,18 +2,19 @@ import express from "express";
 import http from "http";
 import { Server } from "socket.io";
 
+/* ======================
+   APP SETUP
+   ====================== */
 const app = express();
 const server = http.createServer(app);
+
 const io = new Server(server, {
   cors: {
-    origin: "*", 
+    origin: "*",
     methods: ["GET", "POST"]
   }
 });
 
-/* ======================
-   MIDDLEWARE
-   ====================== */
 app.use(express.json());
 app.use(express.static("public"));
 
@@ -33,61 +34,62 @@ if (!N8N_URL) {
 let waitingUser = null;
 
 /* ======================
-   SYSTEM ASSISTANT (STATE BASED) - FIXED
+   SYSTEM ASSISTANT
    ====================== */
 app.post("/assistant-message", async (req, res) => {
   try {
-    // CRITICAL: Map state → intent_key for n8n Switch
-    const state = req.body?.state || "unknown";
-    
+    // Accept BOTH new + old formats safely
+    const state =
+      req.body?.state ||
+      req.body?.text ||
+      "waiting";
+
     console.log("📨 Assistant state received:", state);
 
-    const response = await fetch(N8N_URL, {
+    const n8nResponse = await fetch(N8N_URL, {
       method: "POST",
-      headers: { 
+      headers: {
         "Content-Type": "application/json",
         "User-Agent": "Quiet-Connect/1.0"
       },
-      body: JSON.stringify({ 
-        intent_key: state  // ← FIXED: n8n expects intent_key
+      body: JSON.stringify({
+        intent_key: state
       })
     });
 
-    const raw = await response.text();
+    const raw = await n8nResponse.text();
     console.log("📥 N8N RAW RESPONSE:", raw || "EMPTY");
 
-    // Handle empty n8n response (no Switch match)
+    // HARD FALLBACK — UI never breaks
     if (!raw || raw.trim() === "") {
       return res.json({
         system: true,
-        state: state,
-        message: ""
+        state,
+        message: "⏳ Please wait quietly…"
       });
     }
 
-    // Parse and validate n8n JSON response
-    let n8nData;
+    let data;
     try {
-      n8nData = JSON.parse(raw);
+      data = JSON.parse(raw);
     } catch (e) {
       console.error("❌ Invalid JSON from n8n:", raw);
-      return res.status(500).json({
+      return res.status(502).json({
         system: true,
         state: "error",
-        message: "Assistant processing failed"
+        message: "Assistant response invalid"
       });
     }
 
-    // Forward clean n8n response
-    res.json({
+    return res.json({
       system: true,
-      state: n8nData.state || state,
-      message: n8nData.message || ""
+      state: data.state || state,
+      message: data.message || "⏳ Please wait quietly…"
     });
 
-  } catch (error) {
-    console.error("💥 Assistant error:", error.message);
-    res.status(500).json({
+  } catch (err) {
+    console.error("💥 Assistant error:", err.message);
+    return res.status(500).json({
       system: true,
       state: "error",
       message: "Assistant temporarily unavailable"
@@ -96,84 +98,76 @@ app.post("/assistant-message", async (req, res) => {
 });
 
 /* ======================
-   USER ↔ USER CHAT (SOCKET.IO) - ENHANCED
+   SOCKET.IO CHAT
    ====================== */
 io.on("connection", (socket) => {
   console.log("🔌 User connected:", socket.id);
 
   socket.on("prefs", (prefs) => {
     socket.prefs = prefs;
-    console.log("✅ Prefs set for", socket.id, prefs);
-    
+    console.log("✅ Prefs set:", socket.id, prefs);
+
     if (socket.partnerId) {
       io.to(socket.partnerId).emit("partnerPrefs", prefs);
     }
   });
 
-  // MATCHING LOGIC
   socket.on("join_waiting", () => {
     if (waitingUser && waitingUser.id !== socket.id) {
-      // MATCH FOUND
       const partner = waitingUser;
       waitingUser = null;
 
       socket.partnerId = partner.id;
       partner.partnerId = socket.id;
 
-      // Notify both users
-      socket.emit("status", { 
-        state: "matched", 
-        message: "✅ You're connected! Chat now." 
-      });
-      partner.emit("status", { 
-        state: "matched", 
-        message: "✅ You're connected! Chat now." 
+      socket.emit("status", {
+        state: "matched",
+        message: "✅ You're connected!"
       });
 
-      // Exchange prefs
+      partner.emit("status", {
+        state: "matched",
+        message: "✅ You're connected!"
+      });
+
       if (partner.prefs) socket.emit("partnerPrefs", partner.prefs);
       if (socket.prefs) partner.emit("partnerPrefs", socket.prefs);
 
-      console.log("💕 Match made:", socket.id, "↔", partner.id);
-      
+      console.log("💕 Match:", socket.id, "↔", partner.id);
     } else {
-      // WAITING
       waitingUser = socket;
-      socket.emit("status", { 
-        state: "waiting", 
-        message: "⏳ Waiting quietly for someone to join…" 
+      socket.emit("status", {
+        state: "waiting",
+        message: "⏳ Waiting quietly…"
       });
-      console.log("⏳", socket.id, "now waiting");
+      console.log("⏳ Waiting:", socket.id);
     }
   });
 
-  // CHAT MESSAGES
   socket.on("message", (msg) => {
-    if (socket.partnerId) {
-      io.to(socket.partnerId).emit("message", {
-        ...msg,
-        fromMe: false,  // Partner sees as from other
-        timestamp: Date.now()
-      });
-      console.log("💬", socket.id, "→", msg.text?.substring(0, 30));
-    }
+    if (!socket.partnerId) return;
+
+    const payload =
+      typeof msg === "string"
+        ? { text: msg }
+        : msg;
+
+    io.to(socket.partnerId).emit("message", payload);
+    console.log("💬", socket.id, "→", payload.text?.slice(0, 30));
   });
 
-  // DISCONNECT HANDLING
   socket.on("disconnect", () => {
-    console.log("🔌", socket.id, "disconnected");
-    
+    console.log("🔌 Disconnected:", socket.id);
+
     if (waitingUser?.id === socket.id) {
       waitingUser = null;
-      console.log("🕐 Waiting cleared");
     }
-    
+
     if (socket.partnerId) {
-      io.to(socket.partnerId).emit("status", { 
-        state: "disconnected", 
-        message: "Partner left the chat" 
+      io.to(socket.partnerId).emit("status", {
+        state: "disconnected",
+        message: "Partner left the chat"
       });
-      console.log("💔", socket.id, "left partner:", socket.partnerId);
     }
   });
 });
@@ -182,19 +176,19 @@ io.on("connection", (socket) => {
    HEALTH CHECK
    ====================== */
 app.get("/health", (req, res) => {
-  res.json({ 
-    status: "ok", 
-    n8n: !!N8N_URL,
-    timestamp: new Date().toISOString()
+  res.json({
+    status: "ok",
+    n8n: Boolean(N8N_URL),
+    time: new Date().toISOString()
   });
 });
 
 /* ======================
    START SERVER
    ====================== */
-const PORT = process.env.PORT || 10000;  // Render default
+const PORT = process.env.PORT || 10000;
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ Quiet Connect running on port ${PORT}`);
-  console.log(`🌐 N8N integration: ${N8N_URL ? 'READY' : 'MISSING'}`);
+  console.log(`🌐 N8N integration: READY`);
 });
