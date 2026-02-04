@@ -1,7 +1,6 @@
 import express from "express";
 import http from "http";
 import { Server } from "socket.io";
-import fetch from "node-fetch";
 
 const app = express();
 const server = http.createServer(app);
@@ -29,7 +28,6 @@ let waitingUser = null;
 
 /* ======================
    SYSTEM ASSISTANT
-   (ONLY PART THAT USES n8n)
    ====================== */
 app.post("/assistant-message", async (req, res) => {
   try {
