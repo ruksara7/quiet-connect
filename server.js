@@ -4,7 +4,12 @@ import { Server } from "socket.io";
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const io = new Server(server, {
+  cors: {
+    origin: "*", 
+    methods: ["GET", "POST"]
+  }
+});
 
 /* ======================
    MIDDLEWARE
@@ -19,6 +24,7 @@ const N8N_URL = process.env.N8N_URL;
 
 if (!N8N_URL) {
   console.error("❌ N8N_URL environment variable is NOT set");
+  process.exit(1);
 }
 
 /* ======================
@@ -27,99 +33,168 @@ if (!N8N_URL) {
 let waitingUser = null;
 
 /* ======================
-   SYSTEM ASSISTANT (STATE BASED)
+   SYSTEM ASSISTANT (STATE BASED) - FIXED
    ====================== */
 app.post("/assistant-message", async (req, res) => {
   try {
-    // IMPORTANT: assistant works ONLY on STATE
+    // CRITICAL: Map state → intent_key for n8n Switch
     const state = req.body?.state || "unknown";
+    
+    console.log("📨 Assistant state received:", state);
 
     const response = await fetch(N8N_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ state })
+      headers: { 
+        "Content-Type": "application/json",
+        "User-Agent": "Quiet-Connect/1.0"
+      },
+      body: JSON.stringify({ 
+        intent_key: state  // ← FIXED: n8n expects intent_key
+      })
     });
 
-    // NEVER parse webhook JSON
     const raw = await response.text();
-    console.log("N8N RAW RESPONSE:", raw);
+    console.log("📥 N8N RAW RESPONSE:", raw || "EMPTY");
 
-    // If n8n responds with nothing, stay silent
+    // Handle empty n8n response (no Switch match)
     if (!raw || raw.trim() === "") {
       return res.json({
         system: true,
-        state: "silent",
+        state: state,
         message: ""
       });
     }
 
-    // Forward n8n response exactly
-    res
-      .status(200)
-      .set("Content-Type", "application/json")
-      .send(raw);
+    // Parse and validate n8n JSON response
+    let n8nData;
+    try {
+      n8nData = JSON.parse(raw);
+    } catch (e) {
+      console.error("❌ Invalid JSON from n8n:", raw);
+      return res.status(500).json({
+        system: true,
+        state: "error",
+        message: "Assistant processing failed"
+      });
+    }
+
+    // Forward clean n8n response
+    res.json({
+      system: true,
+      state: n8nData.state || state,
+      message: n8nData.message || ""
+    });
 
   } catch (error) {
-    console.error("Assistant error:", error);
+    console.error("💥 Assistant error:", error.message);
     res.status(500).json({
       system: true,
       state: "error",
-      message: "Assistant unavailable"
+      message: "Assistant temporarily unavailable"
     });
   }
 });
 
 /* ======================
-   USER ↔ USER CHAT (SOCKET.IO)
+   USER ↔ USER CHAT (SOCKET.IO) - ENHANCED
    ====================== */
 io.on("connection", (socket) => {
+  console.log("🔌 User connected:", socket.id);
 
   socket.on("prefs", (prefs) => {
     socket.prefs = prefs;
+    console.log("✅ Prefs set for", socket.id, prefs);
+    
     if (socket.partnerId) {
       io.to(socket.partnerId).emit("partnerPrefs", prefs);
     }
   });
 
   // MATCHING LOGIC
-  if (!waitingUser) {
-    waitingUser = socket;
-    socket.emit("status", "Waiting quietly for someone to join…");
-  } else {
-    const partner = waitingUser;
-    waitingUser = null;
+  socket.on("join_waiting", () => {
+    if (waitingUser && waitingUser.id !== socket.id) {
+      // MATCH FOUND
+      const partner = waitingUser;
+      waitingUser = null;
 
-    socket.partnerId = partner.id;
-    partner.partnerId = socket.id;
+      socket.partnerId = partner.id;
+      partner.partnerId = socket.id;
 
-    socket.emit("status", "You’re connected.");
-    partner.emit("status", "You’re connected.");
+      // Notify both users
+      socket.emit("status", { 
+        state: "matched", 
+        message: "✅ You're connected! Chat now." 
+      });
+      partner.emit("status", { 
+        state: "matched", 
+        message: "✅ You're connected! Chat now." 
+      });
 
-    if (partner.prefs) socket.emit("partnerPrefs", partner.prefs);
-    if (socket.prefs) partner.emit("partnerPrefs", socket.prefs);
-  }
+      // Exchange prefs
+      if (partner.prefs) socket.emit("partnerPrefs", partner.prefs);
+      if (socket.prefs) partner.emit("partnerPrefs", socket.prefs);
 
-  socket.on("message", (msg) => {
-    if (socket.partnerId) {
-      io.to(socket.partnerId).emit("message", msg);
+      console.log("💕 Match made:", socket.id, "↔", partner.id);
+      
+    } else {
+      // WAITING
+      waitingUser = socket;
+      socket.emit("status", { 
+        state: "waiting", 
+        message: "⏳ Waiting quietly for someone to join…" 
+      });
+      console.log("⏳", socket.id, "now waiting");
     }
   });
 
+  // CHAT MESSAGES
+  socket.on("message", (msg) => {
+    if (socket.partnerId) {
+      io.to(socket.partnerId).emit("message", {
+        ...msg,
+        fromMe: false,  // Partner sees as from other
+        timestamp: Date.now()
+      });
+      console.log("💬", socket.id, "→", msg.text?.substring(0, 30));
+    }
+  });
+
+  // DISCONNECT HANDLING
   socket.on("disconnect", () => {
+    console.log("🔌", socket.id, "disconnected");
+    
     if (waitingUser?.id === socket.id) {
       waitingUser = null;
+      console.log("🕐 Waiting cleared");
     }
+    
     if (socket.partnerId) {
-      io.to(socket.partnerId).emit("status", "Partner left");
+      io.to(socket.partnerId).emit("status", { 
+        state: "disconnected", 
+        message: "Partner left the chat" 
+      });
+      console.log("💔", socket.id, "left partner:", socket.partnerId);
     }
+  });
+});
+
+/* ======================
+   HEALTH CHECK
+   ====================== */
+app.get("/health", (req, res) => {
+  res.json({ 
+    status: "ok", 
+    n8n: !!N8N_URL,
+    timestamp: new Date().toISOString()
   });
 });
 
 /* ======================
    START SERVER
    ====================== */
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;  // Render default
 
-server.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`✅ Quiet Connect running on port ${PORT}`);
+  console.log(`🌐 N8N integration: ${N8N_URL ? 'READY' : 'MISSING'}`);
 });
