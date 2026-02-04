@@ -27,23 +27,24 @@ if (!N8N_URL) {
 let waitingUser = null;
 
 /* ======================
-   SYSTEM ASSISTANT (n8n)
+   SYSTEM ASSISTANT (STATE BASED)
    ====================== */
 app.post("/assistant-message", async (req, res) => {
   try {
-    const userText = req.body?.text || "";
+    // IMPORTANT: assistant works ONLY on STATE
+    const state = req.body?.state || "unknown";
 
     const response = await fetch(N8N_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: userText })
+      body: JSON.stringify({ state })
     });
 
-    // IMPORTANT: DO NOT parse JSON
+    // NEVER parse webhook JSON
     const raw = await response.text();
     console.log("N8N RAW RESPONSE:", raw);
 
-    // n8n may legally return empty body
+    // If n8n responds with nothing, stay silent
     if (!raw || raw.trim() === "") {
       return res.json({
         system: true,
@@ -69,7 +70,7 @@ app.post("/assistant-message", async (req, res) => {
 });
 
 /* ======================
-   USER ↔ USER CHAT
+   USER ↔ USER CHAT (SOCKET.IO)
    ====================== */
 io.on("connection", (socket) => {
 
@@ -80,6 +81,7 @@ io.on("connection", (socket) => {
     }
   });
 
+  // MATCHING LOGIC
   if (!waitingUser) {
     waitingUser = socket;
     socket.emit("status", "Waiting quietly for someone to join…");
